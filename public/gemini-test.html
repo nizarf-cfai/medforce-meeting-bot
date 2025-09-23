@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Live API Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #4285f4;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #3367d6;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status.listening {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+        .log {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 10px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .response {
+            background: #e7f3ff;
+            border-left: 4px solid #4285f4;
+            padding: 10px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Gemini Live API Test</h1>
+        <p>Test voice-to-voice conversation with Gemini Live API</p>
+        
+        <div class="status disconnected" id="status">Disconnected</div>
+        
+        <div>
+            <button id="startBtn">🚀 Start Gemini Live</button>
+            <button id="stopBtn" disabled>🛑 Stop</button>
+            <button id="clearBtn">🗑️ Clear Log</button>
+        </div>
+        
+        <div class="response" id="response" style="display: none;">
+            <strong>Gemini Response:</strong>
+            <div id="responseText"></div>
+        </div>
+        
+        <h3>Log:</h3>
+        <div class="log" id="log"></div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let socket = null;
+        let isListening = false;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let sessionId = null;
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const status = document.getElementById('status');
+        const log = document.getElementById('log');
+        const response = document.getElementById('response');
+        const responseText = document.getElementById('responseText');
+
+        function logMessage(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            log.innerHTML += `[${timestamp}] ${message}\n`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function updateStatus(message, className) {
+            status.textContent = message;
+            status.className = `status ${className}`;
+        }
+
+        async function startGeminiLive() {
+            try {
+                logMessage('🚀 Starting Gemini Live...');
+                
+                // Start session
+                const response = await fetch('/api/gemini/live/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to start session');
+                }
+                
+                const data = await response.json();
+                sessionId = data.sessionId;
+                logMessage(`✅ Session started: ${sessionId}`);
+                
+                // Connect to WebSocket
+                socket = io('/gemini-live');
+                
+                socket.on('connect', () => {
+                    logMessage('🔌 WebSocket connected');
+                    socket.emit('join-session', sessionId);
+                });
+                
+                socket.on('session-joined', (data) => {
+                    logMessage(`✅ Joined session: ${data.sessionId}`);
+                    updateStatus('Connected', 'connected');
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                });
+                
+                socket.on('gemini-ready', (data) => {
+                    logMessage(`🤖 Gemini ready: ${data.message}`);
+                    startListening();
+                });
+                
+                socket.on('gemini-response', (data) => {
+                    logMessage(`💬 Gemini response: ${data.text}`);
+                    responseText.textContent = data.text;
+                    response.style.display = 'block';
+                });
+                
+                socket.on('gemini-audio-response', (data) => {
+                    logMessage(`🎵 Gemini Audio Response received`);
+                    playGeminiAudio(data.audioData, data.mimeType);
+                });
+                
+                socket.on('error', (error) => {
+                    logMessage(`❌ Error: ${error.message}`);
+                });
+                
+                socket.on('disconnect', () => {
+                    logMessage('🔌 WebSocket disconnected');
+                    updateStatus('Disconnected', 'disconnected');
+                });
+                
+            } catch (error) {
+                logMessage(`❌ Failed to start: ${error.message}`);
+            }
+        }
+
+        async function startListening() {
+            try {
+                logMessage('🎤 Starting audio capture...');
+                
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Create MediaRecorder for audio chunks
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
+                
+                const chunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        chunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    const blob = new Blob(chunks, { type: 'audio/webm' });
+                    await sendAudioToGemini(blob);
+                };
+                
+                // Record for 3 seconds
+                mediaRecorder.start();
+                updateStatus('Listening...', 'listening');
+                
+                setTimeout(() => {
+                    if (mediaRecorder && mediaRecorder.state === 'recording') {
+                        mediaRecorder.stop();
+                        updateStatus('Processing...', 'connected');
+                    }
+                }, 3000);
+                
+            } catch (error) {
+                logMessage(`❌ Failed to start listening: ${error.message}`);
+            }
+        }
+
+        async function sendAudioToGemini(audioBlob) {
+            try {
+                logMessage('📤 Sending audio to Gemini...');
+                
+                // Convert to PCM format
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const pcmData = convertToPCM(audioBuffer);
+                const base64Audio = btoa(String.fromCharCode(...new Uint8Array(pcmData)));
+                
+                // Send via WebSocket
+                socket.emit('audio-data', {
+                    sessionId: sessionId,
+                    audioData: base64Audio
+                });
+                
+                logMessage('📤 Audio sent successfully');
+                
+                // Start listening again after a short delay
+                setTimeout(() => {
+                    if (isListening) {
+                        startListening();
+                    }
+                }, 1000);
+                
+            } catch (error) {
+                logMessage(`❌ Failed to send audio: ${error.message}`);
+            }
+        }
+
+        function convertToPCM(audioBuffer) {
+            const length = audioBuffer.length;
+            const sampleRate = audioBuffer.sampleRate;
+            const targetSampleRate = 16000;
+            const ratio = sampleRate / targetSampleRate;
+            const newLength = Math.floor(length / ratio);
+            
+            const pcmData = new Int16Array(newLength);
+            const channelData = audioBuffer.getChannelData(0);
+            
+            for (let i = 0; i < newLength; i++) {
+                const sourceIndex = Math.floor(i * ratio);
+                const sample = Math.max(-1, Math.min(1, channelData[sourceIndex]));
+                pcmData[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+            }
+            
+            return pcmData.buffer;
+        }
+
+        function playGeminiAudio(base64Audio, mimeType) {
+            try {
+                logMessage(`🎵 Playing Gemini audio response...`);
+                
+                // Convert base64 to binary
+                const binaryString = atob(base64Audio);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                
+                // Create blob and play
+                const blob = new Blob([bytes], { type: mimeType });
+                const audioUrl = URL.createObjectURL(blob);
+                const audio = new Audio(audioUrl);
+                
+                audio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    logMessage(`🎵 Audio playback completed`);
+                };
+                
+                audio.onerror = (error) => {
+                    logMessage(`❌ Audio playback error: ${error.message}`);
+                    URL.revokeObjectURL(audioUrl);
+                };
+                
+                audio.play();
+                logMessage(`🎵 Audio playback started`);
+                
+            } catch (error) {
+                logMessage(`❌ Failed to play audio: ${error.message}`);
+            }
+        }
+
+        function stopGeminiLive() {
+            try {
+                isListening = false;
+                
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+                
+                if (socket) {
+                    socket.disconnect();
+                    socket = null;
+                }
+                
+                if (audioContext) {
+                    audioContext.close();
+                    audioContext = null;
+                }
+                
+                updateStatus('Disconnected', 'disconnected');
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                
+                logMessage('🛑 Gemini Live stopped');
+                
+            } catch (error) {
+                logMessage(`❌ Failed to stop: ${error.message}`);
+            }
+        }
+
+        // Event listeners
+        startBtn.addEventListener('click', () => {
+            isListening = true;
+            startGeminiLive();
+        });
+        
+        stopBtn.addEventListener('click', stopGeminiLive);
+        
+        clearBtn.addEventListener('click', () => {
+            log.innerHTML = '';
+            response.style.display = 'none';
+        });
+    </script>
+</body>
+</html>

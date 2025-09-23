@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Teams Bot - Hybrid ACS + Graph API</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #333; margin-bottom: 20px; text-align: center; }
+    .row { margin-bottom: 15px; }
+    .row label { display: block; margin-bottom: 5px; font-weight: 500; color: #555; }
+    .row input, .row select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+    .row.flex { display: flex; gap: 10px; align-items: center; }
+    .row.flex button { flex: 1; }
+    button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button:not(:disabled):hover { opacity: 0.9; }
+    #joinBtn { background: #0078d4; color: white; }
+    #leaveBtn { background: #d13438; color: white; }
+    #voiceTestBtn { background: #107c10; color: white; }
+    #transcriptionBtn { background: #8764b8; color: white; }
+    #sendChatBtn { background: #0078d4; color: white; }
+    #apiToggleBtn { background: #8764b8; color: white; }
+    #micPermissionBtn { background: #ff6b35; color: white; }
+    .pill { background: #e1dfdd; padding: 5px 10px; border-radius: 15px; font-size: 12px; color: #666; }
+    #log { background: #f8f8f8; border: 1px solid #ddd; padding: 15px; border-radius: 4px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.4; }
+    .status { padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+    .status.info { background: #e3f2fd; border-left: 4px solid #2196f3; }
+    .status.warning { background: #fff3e0; border-left: 4px solid #ff9800; }
+    .status.success { background: #e8f5e8; border-left: 4px solid #4caf50; }
+    
+    /* Chat styles */
+    .chat-message { margin-bottom: 12px; padding: 8px; border-radius: 8px; }
+    .bot-message { background: #e3f2fd; border-left: 4px solid #2196f3; }
+    .user-message { background: #f3e5f5; border-left: 4px solid #9c27b0; }
+    .message-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .message-header strong { color: #333; }
+    .timestamp { font-size: 12px; color: #666; }
+    .message-content { color: #444; line-height: 1.4; }
+    
+    /* Mode indicator */
+    .mode-indicator { text-align: center; margin-bottom: 20px; }
+    .mode-badge { display: inline-block; padding: 8px 16px; border-radius: 20px; font-weight: bold; color: white; }
+    .mode-acs { background: #0078d4; }
+    .mode-graph { background: #8764b8; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🤖 Teams Bot - Hybrid ACS + Graph API</h1>
+    
+    <div class="mode-indicator">
+      <div class="mode-badge mode-acs" id="modeBadge">ACS Mode</div>
+    </div>
+    
+    <div class="status info">
+      <strong>🚀 Hybrid Integration</strong><br>
+      This version supports both Azure Communication Services (ACS) and Microsoft Graph API approaches. Use the toggle button to switch between modes.
+    </div>
+    
+    <div class="row">
+      <label>Teams meeting link</label>
+      <input id="meetingLink" type="text" placeholder="https://teams.microsoft.com/l/meetup-join/..." />
+    </div>
+    
+    <div class="row flex">
+      <button id="apiToggleBtn">Switch to Graph API Mode</button>
+      <button id="joinBtn">Join Meeting (ACS)</button>
+      <button id="leaveBtn" disabled>Leave Meeting</button>
+    </div>
+    
+    <div class="row flex">
+      <button id="micPermissionBtn">Request Microphone Permission</button>
+      <button id="voiceTestBtn" disabled>Test Voice</button>
+      <button id="transcriptionBtn" disabled>🎙️ Start Recording</button>
+    </div>
+    
+        <div class="row flex">
+          <button id="realtimeBtn" disabled>🔄 Real-Time Mode</button>
+          <button id="stopRealtimeBtn" disabled style="display: none;">🛑 Stop Real-Time</button>
+        </div>
+        <div class="row flex">
+          <button id="geminiLiveBtn" disabled>🤖 Gemini Live Mode</button>
+          <button id="stopGeminiLiveBtn" disabled style="display: none;">🛑 Stop Gemini Live</button>
+        </div>
+    
+    <div class="row">
+      <div class="status info" id="recordingStatus" style="display: none;">
+        <strong>🎙️ Recording Status</strong><br>
+        <span id="recordingInfo">Ready to start recording meeting audio</span>
+      </div>
+    </div>
+    
+    <div class="row">
+      <div class="status info" id="realtimeStatus" style="display: none;">
+        <strong>🔄 Real-Time Status</strong><br>
+        <span id="realtimeInfo">Ready to start real-time processing</span>
+      </div>
+    </div>
+    
+    <div class="row">
+      <label>Current Mode</label>
+      <div class="status info" id="modeStatus">
+        <strong>🎯 Azure Communication Services Mode</strong><br>
+        • Basic meeting join functionality<br>
+        • Local TTS (text-to-speech)<br>
+        • Simulated transcription<br>
+        • Web-based chat interface
+      </div>
+    </div>
+    
+    <!-- Chat Interface -->
+    <div class="row" id="chatSection" style="display: none;">
+      <h3>Meeting Chat</h3>
+      <div id="chatContainer" style="height: 300px; border: 1px solid #ccc; padding: 10px; overflow-y: auto; background: #f9f9f9; border-radius: 8px; margin-bottom: 10px;"></div>
+      <div class="flex">
+        <input type="text" id="chatInput" placeholder="Type a message..." style="flex: 1; margin-right: 8px;" />
+        <button id="sendChatBtn">Send</button>
+      </div>
+    </div>
+    
+    <div class="row">
+      <label>Activity Log</label>
+      <div id="log"></div>
+    </div>
+  </div>
+  
+  <!-- Socket.IO client -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Hybrid client -->
+  <script src="/app-hybrid.js"></script>
+</body>
+</html>
