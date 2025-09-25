@@ -26,9 +26,101 @@ const io = new Server(server, {
   }
 });
 
+// Conversation server connection
+const CONVERSATION_WS_URL = 'ws://localhost:8767';
+let conversationWs = null;
+const conversationSessions = new Map();
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase limit for large audio files
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Connect to conversation server
+async function connectToConversationServer() {
+  try {
+    console.log('💬 Connecting to Python conversation server...');
+    conversationWs = new WebSocket(CONVERSATION_WS_URL);
+    
+    conversationWs.on('open', () => {
+      console.log('✅ Connected to Python conversation server');
+    });
+    
+    conversationWs.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        console.log('💬 Conversation server response:', message);
+        
+        if (message.type === 'welcome') {
+          // Handle welcome message
+          console.log(`💬 Conversation server ready: ${message.client_id}`);
+        } else if (message.type === 'text_response') {
+          // Forward text response to client
+          for (const [sessionId, session] of conversationSessions.entries()) {
+            if (session.conversationWs === conversationWs) {
+              session.socket.emit('conversation-response', {
+                sessionId,
+                message: message.message,
+                timestamp: message.timestamp
+              });
+              break;
+            }
+          }
+        } else if (message.type === 'audio_response') {
+          // Forward audio response to client
+          for (const [sessionId, session] of conversationSessions.entries()) {
+            if (session.conversationWs === conversationWs) {
+              session.socket.emit('conversation-audio-response', {
+                sessionId,
+                message: message.message,
+                timestamp: message.timestamp
+              });
+              break;
+            }
+          }
+        } else if (message.type === 'conversation_history') {
+          // Forward conversation history to client
+          for (const [sessionId, session] of conversationSessions.entries()) {
+            if (session.conversationWs === conversationWs) {
+              session.socket.emit('conversation-history', {
+                sessionId,
+                history: message.history,
+                timestamp: message.timestamp
+              });
+              break;
+            }
+          }
+        } else if (message.type === 'error') {
+          // Forward error to client
+          for (const [sessionId, session] of conversationSessions.entries()) {
+            if (session.conversationWs === conversationWs) {
+              session.socket.emit('conversation-error', {
+                sessionId,
+                message: message.message
+              });
+              break;
+            }
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error parsing conversation server message:', error);
+      }
+    });
+    
+    conversationWs.on('close', () => {
+      console.log('🔌 Conversation server connection closed');
+      setTimeout(connectToConversationServer, 3000); // Attempt to reconnect
+    });
+    
+    conversationWs.on('error', (error) => {
+      console.error('❌ Conversation server connection error:', error);
+      conversationWs.close(); // Close to trigger reconnect
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to connect to conversation server:', error);
+    setTimeout(connectToConversationServer, 3000); // Attempt to reconnect
+  }
+}
 
 // Serve static files from recordings directory
 app.use('/recordings', express.static(path.join(__dirname, 'recordings')));
@@ -136,6 +228,34 @@ app.post('/api/graph/test-voice', async (req, res) => {
     });
   } catch (error) {
     console.error('Error testing voice:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/graph/start-screen-share', async (req, res) => {
+  try {
+    const { url } = req.body;
+    res.json({ 
+      success: true, 
+      message: 'Screen sharing started (simulated)',
+      url: url || 'http://localhost:3001/',
+      note: 'In real implementation, this would start screen sharing in the meeting via Graph API'
+    });
+  } catch (error) {
+    console.error('Error starting screen share:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/graph/stop-screen-share', async (req, res) => {
+  try {
+    res.json({ 
+      success: true, 
+      message: 'Screen sharing stopped (simulated)',
+      note: 'In real implementation, this would stop screen sharing in the meeting via Graph API'
+    });
+  } catch (error) {
+    console.error('Error stopping screen share:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -293,6 +413,281 @@ app.post('/api/openai/generate-response', async (req, res) => {
   }
 });
 
+app.post('/api/openai/generate-structured-response', async (req, res) => {
+  try {
+    const { transcription, user_prompt, context } = req.body;
+    const inputText = user_prompt || transcription;
+    
+    if (!inputText) {
+      return res.status(400).json({ error: 'Input text is required' });
+    }
+    
+    console.log(`🤖 Generating structured response for: ${inputText}`);
+    
+    // Fetch patient data to include in context
+    let patientDataContext = "";
+    try {
+      const patientResponse = await fetch('http://localhost:3001/api/patient-data');
+      const patientData = await patientResponse.json();
+      
+      if (patientData.success) {
+        console.log('📋 Patient data retrieved:', patientData.data);
+        patientDataContext = `\n\nCurrent Patient Data:\n${JSON.stringify(patientData.data, null, 2)}`;
+      } else {
+        console.warn('⚠️ Failed to fetch patient data:', patientData.message);
+        patientDataContext = "\n\nPatient data unavailable.";
+      }
+    } catch (error) {
+      console.error('❌ Error fetching patient data:', error.message);
+      patientDataContext = "\n\nPatient data unavailable due to connection error.";
+    }
+    
+    // Combine context with patient data
+    const enhancedContext = (context || "You are a helpful meeting assistant bot.") + patientDataContext;
+    
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: enhancedContext
+        },
+        {
+          role: "user",
+          content: inputText
+        }
+      ],
+      max_tokens: 500,
+      temperature: 0.7,
+      response_format: { type: "json_object" }
+    });
+    
+    const responseText = completion.choices[0].message.content;
+    let structuredResponse;
+    
+    try {
+      structuredResponse = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('Failed to parse JSON response:', parseError);
+      // Fallback to simple response
+      structuredResponse = {
+        answer: responseText,
+        operation: {
+          mode: "none",
+          target_id: null
+        }
+      };
+    }
+    
+    console.log(`📋 Structured response: ${JSON.stringify(structuredResponse)}`);
+    
+    res.json({
+      success: true,
+      answer: structuredResponse.answer,
+      operation: structuredResponse.operation,
+      transcription: inputText
+    });
+    
+  } catch (error) {
+    console.error('Error generating structured response:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/openai/classify-input', async (req, res) => {
+  try {
+    const { transcription, context } = req.body;
+    
+    if (!transcription) {
+      return res.status(400).json({ error: 'Transcription is required' });
+    }
+    
+    console.log(`🔍 Classifying input: ${transcription}`);
+    
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: context || "Classify the user input as either a question or a task."
+        },
+        {
+          role: "user",
+          content: transcription
+        }
+      ],
+      max_tokens: 100,
+      temperature: 0.3,
+      response_format: { type: "json_object" }
+    });
+    
+    const responseText = completion.choices[0].message.content;
+    let classification;
+    
+    try {
+      classification = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('Failed to parse classification JSON:', parseError);
+      classification = {
+        question: false,
+        task: "canvas"
+      };
+    }
+    
+    console.log(`📋 Classification result: ${JSON.stringify(classification)}`);
+    
+    res.json({
+      success: true,
+      question: classification.question,
+      task: classification.task
+    });
+    
+  } catch (error) {
+    console.error('Error classifying input:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/openai/generate-question-response', async (req, res) => {
+  try {
+    const { transcription, context } = req.body;
+    
+    if (!transcription) {
+      return res.status(400).json({ error: 'Transcription is required' });
+    }
+    
+    console.log(`❓ Generating question response for: ${transcription}`);
+    
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: context || "You are a helpful meeting assistant bot."
+        },
+        {
+          role: "user",
+          content: transcription
+        }
+      ],
+      max_tokens: 200,
+      temperature: 0.7,
+      response_format: { type: "json_object" }
+    });
+    
+    const responseText = completion.choices[0].message.content;
+    let questionResponse;
+    
+    try {
+      questionResponse = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('Failed to parse question response JSON:', parseError);
+      questionResponse = {
+        answer: responseText,
+        operation: {
+          mode: "none",
+          item_id: null
+        }
+      };
+    }
+    
+    console.log(`❓ Question response: ${JSON.stringify(questionResponse)}`);
+    
+    res.json({
+      success: true,
+      answer: questionResponse.answer,
+      operation: questionResponse.operation
+    });
+    
+  } catch (error) {
+    console.error('Error generating question response:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/openai/generate-process-response', async (req, res) => {
+  try {
+    const { transcription, context } = req.body;
+    
+    if (!transcription) {
+      return res.status(400).json({ error: 'Transcription is required' });
+    }
+    
+    console.log(`⚙️ Generating process response for: ${transcription}`);
+    // Fetch patient data to include in context
+    let patientDataContext = "";
+    try {
+      const patientResponse = await fetch('http://localhost:3001/api/patient-data');
+      const patientData = await patientResponse.json();
+      
+      if (patientData.success) {
+        console.log('📋 Patient data retrieved:', patientData.data);
+        patientDataContext = `\n\nCurrent Patient Data:\n${JSON.stringify(patientData.data, null, 2)}`;
+      } else {
+        console.warn('⚠️ Failed to fetch patient data:', patientData.message);
+        patientDataContext = "\n\nPatient data unavailable.";
+      }
+    } catch (error) {
+      console.error('❌ Error fetching patient data:', error.message);
+      patientDataContext = "\n\nPatient data unavailable due to connection error.";
+    }
+
+    // Combine context with patient data
+    const enhancedContext = (context || "You are a helpful meeting assistant bot.") + patientDataContext;
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: enhancedContext
+        },
+        {
+          role: "user",
+          content: transcription
+        }
+      ],
+      max_tokens: 1000,
+      temperature: 0.7,
+      response_format: { type: "json_object" }
+    });
+    
+    const responseText = completion.choices[0].message.content;
+    let processResponse;
+    
+    try {
+      processResponse = JSON.parse(responseText);
+      
+      // Validate todo list structure
+      if (processResponse.result.title && processResponse.result.description && processResponse.result.todo_list) {
+        console.log(`📋 Todo list generated: ${processResponse.result.title}`);
+        console.log(`📝 Description: ${processResponse.result.description}`);
+        console.log(`✅ Tasks: ${processResponse.result.todo_list.length} items`);
+      }
+      
+    } catch (parseError) {
+      console.error('Failed to parse process response JSON:', parseError);
+    }
+    
+    console.log(`⚙️ Process response: ${JSON.stringify(processResponse)}`);
+    
+    res.json({
+      success: true,
+      answer: processResponse.answer,
+      operation: "process",
+      mode: processResponse.result.mode,
+      todo_data: {
+        title: processResponse.result.title,
+        description: processResponse.result.description,
+        todo_list: processResponse.result.todo_list
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error generating process response:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/openai/text-to-speech', async (req, res) => {
   try {
     const { text, voice = "alloy" } = req.body;
@@ -387,6 +782,76 @@ app.get('/chat/:sessionId/messages', (req, res) => {
 // WebSocket connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
+  
+  // Conversation server events
+  socket.on('start-conversation', async (data) => {
+    const sessionId = `conversation_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    conversationSessions.set(sessionId, { socket, conversationWs: null });
+    console.log(`💬 Starting conversation session: ${sessionId}`);
+    
+    // Ensure conversation connection is established
+    if (!conversationWs || conversationWs.readyState !== WebSocket.OPEN) {
+      await new Promise(resolve => {
+        const interval = setInterval(() => {
+          if (conversationWs && conversationWs.readyState === WebSocket.OPEN) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+
+    conversationSessions.get(sessionId).conversationWs = conversationWs;
+    socket.emit('conversation-session-started', { sessionId });
+    console.log(`💬 Conversation session started: ${sessionId}`);
+  });
+
+  socket.on('send-message', (data) => {
+    const { sessionId, message } = data;
+    const session = conversationSessions.get(sessionId);
+    if (session && session.conversationWs && session.conversationWs.readyState === WebSocket.OPEN) {
+      session.conversationWs.send(JSON.stringify({ 
+        type: 'text_message', 
+        message: message 
+      }));
+      console.log(`💬 Message sent to conversation server: ${message}`);
+    } else {
+      console.warn(`⚠️ No active conversation session for ${sessionId}`);
+    }
+  });
+
+  socket.on('send-audio', (data) => {
+    const { sessionId, audioData } = data;
+    const session = conversationSessions.get(sessionId);
+    if (session && session.conversationWs && session.conversationWs.readyState === WebSocket.OPEN) {
+      session.conversationWs.send(JSON.stringify({ 
+        type: 'audio_message', 
+        audio_data: audioData 
+      }));
+      console.log(`💬 Audio sent to conversation server`);
+    } else {
+      console.warn(`⚠️ No active conversation session for ${sessionId}`);
+    }
+  });
+
+  socket.on('get-conversation-history', (data) => {
+    const { sessionId } = data;
+    const session = conversationSessions.get(sessionId);
+    if (session && session.conversationWs && session.conversationWs.readyState === WebSocket.OPEN) {
+      session.conversationWs.send(JSON.stringify({ 
+        type: 'get_history' 
+      }));
+      console.log(`💬 Requesting conversation history for ${sessionId}`);
+    } else {
+      console.warn(`⚠️ No active conversation session for ${sessionId}`);
+    }
+  });
+
+  socket.on('stop-conversation', (data) => {
+    const { sessionId } = data;
+    conversationSessions.delete(sessionId);
+    console.log(`💬 Conversation session stopped: ${sessionId}`);
+  });
   
   socket.on('joinChat', (sessionId) => {
     socket.join(sessionId);
@@ -604,4 +1069,5 @@ server.listen(PORT, () => {
   console.log(`ACS endpoints available at /api/acs/*`);
   console.log(`Graph API endpoints available at /api/graph/* (simulated)`);
   console.log(`💡 To enable real Graph API integration, configure your Azure AD app and update the endpoints`);
+  // connectToConversationServer(); // Connect to Python conversation server (optional)
 });

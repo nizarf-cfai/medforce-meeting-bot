@@ -84,11 +84,23 @@
           <button id="geminiLiveBtn" disabled>🤖 Gemini Live Mode</button>
           <button id="stopGeminiLiveBtn" disabled style="display: none;">🛑 Stop Gemini Live</button>
         </div>
+        
+        <div class="row flex">
+          <button id="startScreenShareBtn" disabled>🖥️ Start Screen Share</button>
+          <button id="stopScreenShareBtn" disabled style="display: none;">⏹️ Stop Screen Share</button>
+        </div>
     
     <div class="row">
       <div class="status info" id="recordingStatus" style="display: none;">
         <strong>🎙️ Recording Status</strong><br>
         <span id="recordingInfo">Ready to start recording meeting audio</span>
+      </div>
+    </div>
+    
+    <div class="row">
+      <div class="status info" id="screenShareStatus" style="display: none;">
+        <strong>📺 Screen Sharing Status</strong><br>
+        <span id="screenShareInfo">Sharing: <span id="screenShareUrl">http://localhost:3001/</span></span>
       </div>
     </div>
     
@@ -117,6 +129,25 @@
       <div class="flex">
         <input type="text" id="chatInput" placeholder="Type a message..." style="flex: 1; margin-right: 8px;" />
         <button id="sendChatBtn">Send</button>
+      </div>
+    </div>
+    
+    <!-- Conversation Testing Section -->
+    <div class="row">
+      <h3>💬 Conversation Testing</h3>
+      <div class="flex">
+        <button id="startConversationBtn" class="btn">🚀 Start Conversation</button>
+        <button id="stopConversationBtn" class="btn" disabled>🛑 Stop Conversation</button>
+        <button id="getHistoryBtn" class="btn" disabled>📜 Get History</button>
+      </div>
+      
+      <div id="conversationContainer" style="height: 200px; border: 1px solid #ccc; padding: 10px; overflow-y: auto; background: #f0f8ff; border-radius: 8px; margin: 10px 0; display: none;">
+        <div id="conversationMessages"></div>
+      </div>
+      
+      <div class="flex" id="conversationInput" style="display: none;">
+        <input type="text" id="conversationInput" placeholder="Type your message..." style="flex: 1; margin-right: 8px;" />
+        <button id="sendConversationBtn">Send</button>
       </div>
     </div>
     

@@ -1,7 +1,7 @@
 // Hybrid Teams Bot - ACS + Microsoft Graph API Integration
 // This combines the existing ACS functionality with Graph API capabilities
 
-import { CallClient, LocalAudioStream } from "@azure/communication-calling";
+import { CallClient, LocalAudioStream, LocalVideoStream } from "@azure/communication-calling";
 import { AzureCommunicationTokenCredential } from "@azure/communication-common";
 
 // Global variables
@@ -41,6 +41,15 @@ let geminiAudioContext = null;
 let geminiMediaRecorder = null;
 let geminiSocket = null;
 
+// Conversation testing states
+let conversationSessionId = null;
+let isConversationActive = false;
+
+// Screen sharing states
+let isScreenSharing = false;
+let screenShareStream = null;
+let screenShareUrlValue = 'http://localhost:3001/';
+
 // UI elements
 const joinBtn = document.getElementById('joinBtn');
 const leaveBtn = document.getElementById('leaveBtn');
@@ -68,6 +77,9 @@ function log(message) {
   logElement.scrollTop = logElement.scrollHeight;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
   log('🚀 Hybrid Teams Bot initialized');
@@ -287,6 +299,7 @@ async function joinMeetingWithACS(meetingLink) {
         transcriptionBtn.disabled = false;
         realtimeBtn.disabled = false;
         geminiLiveBtn.disabled = false;
+        startScreenShareBtn.disabled = false;
         log('🔘 Recording and real-time buttons enabled (ACS mode)');
         log(`🔍 Button element found: ${transcriptionBtn ? 'Yes' : 'No'}`);
         
@@ -369,6 +382,7 @@ async function leaveMeeting() {
     leaveBtn.disabled = true;
     voiceTestBtn.disabled = true;
     transcriptionBtn.disabled = true;
+    startScreenShareBtn.disabled = true;
     
     // Stop chat session
     stopChatSession();
@@ -950,7 +964,7 @@ function audioBufferToWav(buffer) {
 async function processRecordedAudio(filename) {
   try {
     log('🤖 Processing recorded audio with OpenAI...');
-    
+    let boxId = null;
     // Step 1: Transcribe the audio
     log('🎤 Transcribing audio...');
     const transcriptionResponse = await fetch('/api/openai/transcribe-audio', {
@@ -976,27 +990,59 @@ async function processRecordedAudio(filename) {
       return;
     }
     
-    // Step 2: Generate response
-    log('🤖 Generating AI response...');
-    const responseResponse = await fetch('/api/openai/generate-response', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ 
-        transcription,
-        context: "You are a helpful meeting assistant bot. Provide concise, helpful responses to meeting participants."
-      })
-    });
+    // Step 2: Classify input and generate appropriate response
+    log('🤖 Classifying input and generating response...');
+    const classification = await classifyInput(transcription);
+    log(`📋 Classification: ${JSON.stringify(classification)}`);
     
-    if (!responseResponse.ok) {
-      throw new Error('Failed to generate response');
+    let structuredResponse;
+    if (classification.question) {
+      // Simple question - generate direct answer
+      structuredResponse = await generateQuestionResponse(transcription);
+    } else if (classification.task === "canvas") {
+      // Canvas task - use current structured response
+      structuredResponse = await generateStructuredResponse(transcription);
+      try {
+        await executeOperation(structuredResponse.operation);
+        log(`✅ Operation completed: ${structuredResponse.operation.mode}`);
+      } catch (operationError) {
+        log(`⚠️ Operation failed but continuing with TTS: ${operationError.message}`);
+        // Continue with TTS even if operation fails
+      }
+    } else if (classification.task === "process") {
+      // Process task - use process-specific response
+      structuredResponse = await generateProcessResponse(transcription);
+      try {
+        processResult = await executeProcess(structuredResponse);
+        log(`✅ Process completed: ${structuredResponse.operation}`);
+        boxId = processResult.boxId;
+        log(`Box ID: ${boxId}`);
+        await sleep(3000);
+        
+      } catch (processError) {
+        log(`⚠️ Process failed but continuing with TTS: ${processError.message}`);
+        // Continue with TTS even if operation fails
+      }
+
+      
+    } else {
+      // Fallback to general response
+      structuredResponse = await generateStructuredResponse(transcription);
     }
     
-    const responseData = await responseResponse.json();
-    const aiResponse = responseData.response;
+    log(`💬 AI Response: ${structuredResponse.answer}`);
+    log(`🔧 Operation: ${JSON.stringify(structuredResponse.operation)}`);
     
-    log(`💬 AI Response: ${aiResponse}`);
+    // Step 2.5: Execute operation if present
+    // if (classification.task === "canvas") {
+    //   try {
+    //     await executeOperation(structuredResponse.operation);
+    //     log(`✅ Operation completed: ${structuredResponse.operation.mode}`);
+    //   } catch (operationError) {
+    //     log(`⚠️ Operation failed but continuing with TTS: ${operationError.message}`);
+    //     // Continue with TTS even if operation fails
+    //   }
+    // }
     
     // Step 3: Convert to speech
     log('🔊 Converting response to speech...');
@@ -1006,7 +1052,7 @@ async function processRecordedAudio(filename) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ 
-        text: aiResponse,
+        text: structuredResponse.answer,
         voice: "alloy" // You can change this to "nova", "shimmer", "echo", "fable", "onyx"
       })
     });
@@ -1019,7 +1065,22 @@ async function processRecordedAudio(filename) {
     const responseFilename = ttsData.filename;
     
     log(`🎵 TTS audio generated: ${responseFilename}`);
-    
+    if (boxId) {
+      log(`🔍 Focusing on box: ${boxId}`);
+      log(`🔍 type of boxId: ${typeof boxId}`);
+      try {
+        await executeOperation(
+          {
+            mode: "http://localhost:3001/api/focus-item",
+            item_id: String(boxId)
+          }
+        );
+        log(`✅ Focused on box: ${boxId}`);
+      } catch (operationError) {
+        log(`⚠️ Operation failed but continuing with TTS: ${operationError.message}`);
+        // Continue with TTS even if operation fails
+      }
+    }
     // Step 4: Play the response in the meeting
     log('🎤 Playing AI response in meeting...');
     await playResponseInMeeting(responseFilename);
@@ -1524,8 +1585,34 @@ stopRealtimeBtn.onclick = () => stopRealtimeProcessing();
 const geminiLiveBtn = document.getElementById('geminiLiveBtn');
 const stopGeminiLiveBtn = document.getElementById('stopGeminiLiveBtn');
 
+// Screen sharing UI elements
+const startScreenShareBtn = document.getElementById('startScreenShareBtn');
+const stopScreenShareBtn = document.getElementById('stopScreenShareBtn');
+const screenShareStatus = document.getElementById('screenShareStatus');
+const screenShareInfo = document.getElementById('screenShareInfo');
+const screenShareUrl = document.getElementById('screenShareUrl');
+
+// Conversation UI elements
+const startConversationBtn = document.getElementById('startConversationBtn');
+const stopConversationBtn = document.getElementById('stopConversationBtn');
+const getHistoryBtn = document.getElementById('getHistoryBtn');
+const conversationContainer = document.getElementById('conversationContainer');
+const conversationMessages = document.getElementById('conversationMessages');
+const conversationInput = document.getElementById('conversationInput');
+const sendConversationBtn = document.getElementById('sendConversationBtn');
+
 geminiLiveBtn.onclick = () => startGeminiLive();
 stopGeminiLiveBtn.onclick = () => stopGeminiLive();
+
+// Screen sharing event listeners
+startScreenShareBtn.onclick = () => startScreenShare();
+stopScreenShareBtn.onclick = () => stopScreenShare();
+
+// Conversation event listeners
+startConversationBtn.onclick = () => startConversation();
+stopConversationBtn.onclick = () => stopConversation();
+getHistoryBtn.onclick = () => getConversationHistory();
+sendConversationBtn.onclick = () => sendConversationMessage();
 
 // Chat input handling
 chatInput.addEventListener('keypress', (e) => {
@@ -2118,5 +2205,503 @@ function sendChatInput() {
   if (message && isChatActive) {
     sendChatMessage(message);
     chatInput.value = '';
+  }
+}
+
+// Conversation functions
+function startConversation() {
+  try {
+    log('💬 Starting conversation with Python server...');
+    socket.emit('start-conversation', {});
+  } catch (error) {
+    log(`❌ Failed to start conversation: ${error.message}`);
+  }
+}
+
+function stopConversation() {
+  try {
+    if (conversationSessionId) {
+      socket.emit('stop-conversation', { sessionId: conversationSessionId });
+      conversationSessionId = null;
+      isConversationActive = false;
+      
+      // Update UI
+      startConversationBtn.disabled = false;
+      stopConversationBtn.disabled = true;
+      getHistoryBtn.disabled = true;
+      conversationContainer.style.display = 'none';
+      conversationInput.style.display = 'none';
+      
+      log('💬 Conversation stopped');
+    }
+  } catch (error) {
+    log(`❌ Failed to stop conversation: ${error.message}`);
+  }
+}
+
+function sendConversationMessage() {
+  try {
+    const message = conversationInput.value.trim();
+    if (!message || !conversationSessionId) return;
+    
+    // Add user message to display
+    addConversationMessage('user', message);
+    
+    // Send to server
+    socket.emit('send-message', { 
+      sessionId: conversationSessionId, 
+      message: message 
+    });
+    
+    conversationInput.value = '';
+    log(`💬 Message sent: ${message}`);
+  } catch (error) {
+    log(`❌ Failed to send message: ${error.message}`);
+  }
+}
+
+function getConversationHistory() {
+  try {
+    if (conversationSessionId) {
+      socket.emit('get-conversation-history', { sessionId: conversationSessionId });
+      log('💬 Requesting conversation history...');
+    }
+  } catch (error) {
+    log(`❌ Failed to get history: ${error.message}`);
+  }
+}
+
+function addConversationMessage(role, message) {
+  const messageDiv = document.createElement('div');
+  messageDiv.style.marginBottom = '8px';
+  messageDiv.style.padding = '8px';
+  messageDiv.style.borderRadius = '4px';
+  
+  if (role === 'user') {
+    messageDiv.style.backgroundColor = '#e3f2fd';
+    messageDiv.style.textAlign = 'right';
+    messageDiv.innerHTML = `<strong>You:</strong> ${message}`;
+  } else {
+    messageDiv.style.backgroundColor = '#f1f8e9';
+    messageDiv.style.textAlign = 'left';
+    messageDiv.innerHTML = `<strong>Bot:</strong> ${message}`;
+  }
+  
+  conversationMessages.appendChild(messageDiv);
+  conversationContainer.scrollTop = conversationContainer.scrollHeight;
+}
+
+// Socket event handlers for conversation
+socket.on('conversation-session-started', (data) => {
+  conversationSessionId = data.sessionId;
+  isConversationActive = true;
+  
+  // Update UI
+  startConversationBtn.disabled = true;
+  stopConversationBtn.disabled = false;
+  getHistoryBtn.disabled = false;
+  conversationContainer.style.display = 'block';
+  conversationInput.style.display = 'flex';
+  
+  log(`💬 Conversation session started: ${data.sessionId}`);
+  addConversationMessage('system', 'Conversation started! You can now chat with the bot.');
+});
+
+socket.on('conversation-response', (data) => {
+  addConversationMessage('assistant', data.message);
+  log(`💬 Bot response: ${data.message}`);
+});
+
+socket.on('conversation-history', (data) => {
+  conversationMessages.innerHTML = '';
+  data.history.forEach(entry => {
+    addConversationMessage(entry.role, entry.message);
+  });
+  log(`💬 Conversation history loaded: ${data.history.length} messages`);
+});
+
+socket.on('conversation-error', (data) => {
+  log(`❌ Conversation error: ${data.message}`);
+  addConversationMessage('system', `Error: ${data.message}`);
+});
+
+// Input classification function
+async function classifyInput(transcription) {
+  try {
+    log('🔍 Classifying input type...');
+    
+    const response = await fetch('/api/openai/classify-input', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        transcription,
+        context: `Classify the user input as either a question or a task.
+        
+        If it's a question (asking for information, clarification, or explanation), return:
+        {"question": true, "task": ""}
+        
+        If it's a task, determine the type:
+        - "canvas" for navigation/movement tasks (move to, go to, focus on, show me)
+        - "process" for analysis/processing tasks (do analysis, start diagnose, fetch data, run report)
+        
+        Return JSON format:
+        {"question": false, "task": "canvas"} or {"question": false, "task": "process"}`
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to classify input');
+    }
+    
+    const classification = await response.json();
+    log(`📋 Classification result: ${JSON.stringify(classification)}`);
+    
+    return classification;
+    
+  } catch (error) {
+    log(`❌ Error classifying input: ${error.message}`);
+    
+    // Fallback classification
+    return {
+      question: false,
+      task: "canvas"
+    };
+  }
+}
+
+// Question response generator
+async function generateQuestionResponse(transcription) {
+  try {
+    log('❓ Generating question response...');
+    
+    const response = await fetch('/api/openai/generate-question-response', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        transcription,
+        context: `You are MedForce AI, a helpful meeting assistant. 
+        Answer the user's question directly and concisely.
+        Always respond with a JSON object containing:
+        - "answer": A direct, helpful answer to the question
+        - "operation": {"mode": "none", "item_id": null}`
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to generate question response');
+    }
+    
+    const responseData = await response.json();
+    log(`❓ Question response: ${responseData.answer}`);
+    
+    return responseData;
+    
+  } catch (error) {
+    log(`❌ Error generating question response: ${error.message}`);
+    
+    return {
+      answer: "I understand your question, but I'm having trouble processing it right now. Please try again.",
+      operation: {
+        mode: "none",
+        item_id: null
+      }
+    };
+  }
+}
+
+// Process response generator
+async function generateProcessResponse(transcription) {
+  try {
+    log('⚙️ Generating process response...');
+    
+    const response = await fetch('/api/openai/generate-process-response', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        transcription,
+        context: `You are MedForce AI, a medical assistant that creates todo lists for medical tasks and processes.
+        
+        When the user requests a process or task, generate a structured todo list with:
+        - "title": "To Do: " + brief description of what will be done
+        - "description": One or two sentences describing the action
+        - "todo_list": Array of specific tasks in order of execution
+        
+        Always respond with a JSON object containing:
+        - "answer": A natural response about creating the todo list
+        - "result": {"mode": "http://localhost:3001/api/add-box", "title": "To Do: Perform Analysis of the patient", "description": "some description", "todo_list" : ["task1", "task2"]}
+        
+        The todo_list should be practical, actionable steps that can be executed in sequence.`
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to generate process response');
+    }
+    
+    const responseData = await response.json();
+    log(`⚙️ Process response: ${responseData.answer}`);
+    
+    return responseData;
+    
+  } catch (error) {
+    log(`❌ Error generating process response: ${error.message}`);
+    
+    return {
+      answer: "I understand you want to perform a process, but I'm having trouble processing it right now. Please try again.",
+      operation: {
+        mode: "none",
+        item_id: null
+      }
+    };
+  }
+}
+
+// Operation execution function
+async function executeOperation(operation) {
+  try {
+    log(`🚀 Executing operation: ${operation.mode} with item_id: ${operation.item_id}`);
+    
+    const response = await fetch(operation.mode, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        itemId: operation.item_id
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    log(`✅ Operation executed successfully: ${JSON.stringify(result)}`);
+    
+    return result;
+    
+  } catch (error) {
+    log(`❌ Failed to execute operation: ${error.message}`);
+    throw error;
+  }
+}
+
+async function executeProcess(structuredResponse) {
+  try {
+    log(`🚀 Executing operation: ${structuredResponse}`);
+    const items = structuredResponse.todo_data.todo_list.map((text, index) => ({
+      id: index + 1,
+      text,
+      status: "pending",   // default value, change if needed
+      priority: "medium"   // default value, change if needed
+    }));
+
+    const response = await fetch("http://localhost:3001/api/add-box", {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: structuredResponse.todo_data.title,
+        content: structuredResponse.todo_data.description,
+        color: "#E3F2FD",
+        items,  // mapped from todo_list
+        area: "planning-zone"
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    log(`✅ Process executed successfully: ${JSON.stringify(result)}`);
+    
+    return result;
+    
+  } catch (error) {
+    log(`❌ Failed to execute process: ${error.message}`);
+    throw error;
+  }
+}
+// Structured response generation function
+async function generateStructuredResponse(transcription) {
+  try {
+    log('🤖 Generating structured response for transcription...');
+    let user_prompt = "User input: " + transcription;
+    const response = await fetch('/api/openai/generate-structured-response', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        user_prompt,
+        context: `You are MedForce AI, a helpful meeting assistant. 
+        Identify the user input if it is simple question or a task.
+        If it is a simple question, provide a concise answer.
+        If it is a task, provide a detailed answer with the operation to be performed.
+        The operation should be one of the following:
+        - "http://localhost:3001/api/focus-item": focus view port to the specific item, or move to target item
+
+        These are the available items ids:
+        - todo-213 : To-do list box for patient diagnosis tasks
+        - data-analyst-1 : Data analyst box for EHR patient record analysis
+        - drug-watch : Drug watch agent for medication monitoring
+        - 1 : Testing box 1 (basic test box)
+        - 2 : Testing box 2 (basic test box)
+        - 3 : Testing box 3 (basic test box)
+        
+        Always respond with a JSON object containing:
+        - "answer": A natural, conversational response to the user input
+        - "operation": An object with "mode" and "item_id" fields
+        
+        The answer should be what you would say to the user.
+        The operation should indicate what action to take based on their request.`
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to generate structured response');
+    }
+    
+    const responseData = await response.json();
+    log(`📋 Structured response received: ${JSON.stringify(responseData)}`);
+    
+    return responseData;
+    
+  } catch (error) {
+    log(`❌ Error generating structured response: ${error.message}`);
+    
+    // Fallback to simple response
+    return {
+      answer: "I understand your request, but I'm having trouble processing it right now. Please try again.",
+      operation: {
+        mode: "none",
+        target_id: null
+      }
+    };
+  }
+}
+
+// Screen sharing functions
+async function startScreenShare() {
+  try {
+    log('🖥️ Starting screen share...');
+    
+    // Check if we're in a meeting
+    if (!currentCall || currentCall.state !== 'Connected') {
+      log('❌ Must be connected to a meeting to start screen share');
+      return;
+    }
+    
+    // Request screen capture with high quality settings
+    const screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        mediaSource: 'screen',
+        width: { 
+          ideal: 2560,
+          max: 3840 
+        },
+        height: { 
+          ideal: 1440,
+          max: 2160 
+        },
+        frameRate: { 
+          ideal: 60,
+          max: 60 
+        },
+        aspectRatio: { ideal: 16/9 },
+        cursor: 'always', // Show cursor
+        displaySurface: 'monitor' // Prefer full screen
+      },
+      audio: false // We'll handle audio separately
+    });
+    
+    // Create local video stream with optimized settings
+    const localVideoStream = new LocalVideoStream(screenStream);
+    
+    // Log screen capture settings
+    const videoTrack = screenStream.getVideoTracks()[0];
+    if (videoTrack) {
+      const settings = videoTrack.getSettings();
+      log(`📺 Screen capture settings: ${settings.width}x${settings.height} @ ${settings.frameRate}fps`);
+      
+      // Try to improve quality if possible
+      if (settings.width < 1920 || settings.height < 1080) {
+        log('💡 For better quality, try selecting "Entire screen" and your main monitor');
+      }
+    }
+    
+    // Start screen sharing in the call
+    await currentCall.startVideo(localVideoStream);
+    
+    // Update state
+    isScreenSharing = true;
+    screenShareStream = localVideoStream;
+    
+    // Update UI
+    startScreenShareBtn.disabled = true;
+    startScreenShareBtn.style.display = 'none';
+    stopScreenShareBtn.disabled = false;
+    stopScreenShareBtn.style.display = 'inline-block';
+    screenShareStatus.style.display = 'block';
+    screenShareUrl.textContent = screenShareUrlValue;
+    
+    log('✅ Screen share started successfully');
+    log('💡 Tip: For best quality, select "Entire screen" and choose your main monitor');
+    
+    // Handle stream end (user stops sharing)
+    screenStream.getVideoTracks()[0].onended = () => {
+      log('📺 Screen share ended by user');
+      stopScreenShare();
+    };
+    
+  } catch (error) {
+    log(`❌ Failed to start screen share: ${error.message}`);
+    
+    // Reset UI on error
+    startScreenShareBtn.disabled = false;
+    startScreenShareBtn.style.display = 'inline-block';
+    stopScreenShareBtn.disabled = true;
+    stopScreenShareBtn.style.display = 'none';
+    screenShareStatus.style.display = 'none';
+  }
+}
+
+async function stopScreenShare() {
+  try {
+    log('⏹️ Stopping screen share...');
+    
+    if (currentCall && isScreenSharing) {
+      // Stop video in the call
+      await currentCall.stopVideo();
+      
+      // Stop the local stream
+      if (screenShareStream) {
+        screenShareStream.getMediaStream().getTracks().forEach(track => track.stop());
+        screenShareStream = null;
+      }
+    }
+    
+    // Update state
+    isScreenSharing = false;
+    
+    // Update UI
+    startScreenShareBtn.disabled = false;
+    startScreenShareBtn.style.display = 'inline-block';
+    stopScreenShareBtn.disabled = true;
+    stopScreenShareBtn.style.display = 'none';
+    screenShareStatus.style.display = 'none';
+    
+    log('✅ Screen share stopped');
+    
+  } catch (error) {
+    log(`❌ Failed to stop screen share: ${error.message}`);
   }
 }
